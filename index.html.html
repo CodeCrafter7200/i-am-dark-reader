@@ -1,0 +1,817 @@
+<html><head><style>body {
+   color: black;
+}
+</style></head><body><p>import React, { useState, useEffect, createContext, useContext } from &#39;react&#39;;
+import { initializeApp } from &#39;firebase/app&#39;;
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from &#39;firebase/auth&#39;;
+import { getFirestore, collection, doc, addDoc, getDocs, updateDoc, deleteDoc, onSnapshot, query, orderBy, getDoc } from &#39;firebase/firestore&#39;;</p>
+<p>// --- Firebase Configuration and Initialization ---
+// Global variables provided by the Canvas environment
+const appId = typeof <strong>app_id !== &#39;undefined&#39; ? </strong>app_id : &#39;default-app-id&#39;;
+const firebaseConfig = typeof <strong>firebase_config !== &#39;undefined&#39; ? JSON.parse(</strong>firebase_config) : {};
+const initialAuthToken = typeof <strong>initial_auth_token !== &#39;undefined&#39; ? </strong>initial_auth_token : null;</p>
+<p>// Initialize Firebase App
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);</p>
+<p>// --- Auth Context for User Management ---
+const AuthContext = createContext(null);</p>
+<p>const AuthProvider = ({ children }) =&gt; {
+    const [currentUser, setCurrentUser] = useState(null);
+    const [loadingAuth, setLoadingAuth] = useState(true); // To indicate if auth state is ready
+    const [userId, setUserId] = useState(null); // Explicit userId state</p>
+<pre><code>useEffect(<span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    <span class="hljs-comment">// Sign in using the custom token if provided, otherwise anonymously</span>
+    <span class="hljs-keyword">const</span> signInUser = <span class="hljs-keyword">async</span> () =&gt; {
+        <span class="hljs-keyword">try</span> {
+            <span class="hljs-keyword">if</span> (initialAuthToken) {
+                <span class="hljs-keyword">await</span> signInWithCustomToken(auth, initialAuthToken);
+                <span class="hljs-built_in">console</span>.log(<span class="hljs-string">"Signed in with custom token."</span>);
+            } <span class="hljs-keyword">else</span> {
+                <span class="hljs-keyword">await</span> signInAnonymously(auth);
+                <span class="hljs-built_in">console</span>.log(<span class="hljs-string">"Signed in anonymously."</span>);
+            }
+        } <span class="hljs-keyword">catch</span> (error) {
+            <span class="hljs-built_in">console</span>.error(<span class="hljs-string">"Firebase authentication error:"</span>, error);
+        } <span class="hljs-keyword">finally</span> {
+            <span class="hljs-comment">// setLoadingAuth(false); // Do not set here, let onAuthStateChanged handle final state</span>
+        }
+    };
+
+    <span class="hljs-comment">// Listen for auth state changes</span>
+    <span class="hljs-keyword">const</span> unsubscribe = onAuthStateChanged(auth, (user) =&gt; {
+        setCurrentUser(user);
+        setUserId(user ? user.uid : crypto.randomUUID()); <span class="hljs-comment">// Use user UID if authenticated, else random</span>
+        setLoadingAuth(<span class="hljs-literal">false</span>); <span class="hljs-comment">// Auth state is now known</span>
+    });
+
+    signInUser(); <span class="hljs-comment">// Attempt sign-in on mount</span>
+
+    <span class="hljs-comment">// Cleanup subscription on unmount</span>
+    <span class="hljs-keyword">return</span> <span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> unsubscribe();
+}, []); <span class="hljs-comment">// Empty dependency array ensures this runs once on mount</span>
+
+<span class="hljs-keyword">const</span> logout = <span class="hljs-keyword">async</span> () =&gt; {
+    <span class="hljs-keyword">try</span> {
+        <span class="hljs-keyword">await</span> signOut(auth);
+        <span class="hljs-built_in">console</span>.log(<span class="hljs-string">"User signed out."</span>);
+    } <span class="hljs-keyword">catch</span> (error) {
+        <span class="hljs-built_in">console</span>.error(<span class="hljs-string">"Error signing out:"</span>, error);
+    }
+};
+
+<span class="hljs-keyword">return</span> (
+    <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">AuthContext.Provider</span> <span class="hljs-attr">value</span>=<span class="hljs-string">{{</span> <span class="hljs-attr">currentUser</span>, <span class="hljs-attr">loadingAuth</span>, <span class="hljs-attr">logout</span>, <span class="hljs-attr">userId</span> }}&gt;</span>
+        {children}
+    <span class="hljs-tag">&lt;/<span class="hljs-name">AuthContext.Provider</span>&gt;</span>
+);</span>
+</code></pre><p>};</p>
+<p>// --- Custom Hook for Auth Context ---
+const useAuth = () =&gt; {
+    return useContext(AuthContext);
+};</p>
+<p>// --- Book Service (Firestore Operations) ---
+const getBooksCollectionRef = () =&gt; {
+    // Books are stored in a public collection for this platform
+    return collection(db, &#39;artifacts&#39;, appId, &#39;public&#39;, &#39;data&#39;, &#39;books&#39;);
+};</p>
+<p>const bookService = {
+    // Fetches all books in real-time
+    onBooksSnapshot: (callback) =&gt; {
+        const q = query(getBooksCollectionRef()); // No orderBy here to avoid index requirements
+        return onSnapshot(q, (snapshot) =&gt; {
+            const books = snapshot.docs.map(doc =&gt; ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            // Sort books by title alphabetically in memory for consistent display
+            books.sort((a, b) =&gt; (a.title || &#39;&#39;).localeCompare(b.title || &#39;&#39;));
+            callback(books);
+        }, (error) =&gt; {
+            console.error(&quot;Error listening to books:&quot;, error);
+            // Optionally, handle error state in UI
+        });
+    },</p>
+<pre><code><span class="hljs-comment">// Fetches a single book by ID</span>
+getBookById: async (bookId) =&gt; {
+    <span class="hljs-keyword">try</span> {
+        <span class="hljs-keyword">const</span> bookDocRef = doc(getBooksCollectionRef(), bookId);
+        <span class="hljs-keyword">const</span> bookSnap = <span class="hljs-function">await <span class="hljs-title">getDoc</span><span class="hljs-params">(bookDocRef)</span></span>;
+        <span class="hljs-keyword">if</span> (bookSnap.exists()) {
+            <span class="hljs-keyword">return</span> { id: bookSnap.id, ...bookSnap.data() };
+        } <span class="hljs-keyword">else</span> {
+            <span class="hljs-keyword">return</span> <span class="hljs-keyword">null</span>;
+        }
+    } <span class="hljs-keyword">catch</span> (<span class="hljs-keyword">error</span>) {
+        console.<span class="hljs-keyword">error</span>(<span class="hljs-string">"Error fetching book by ID:"</span>, <span class="hljs-keyword">error</span>);
+        <span class="hljs-keyword">throw</span> <span class="hljs-keyword">error</span>;
+    }
+},
+
+<span class="hljs-comment">// Adds a new book</span>
+addBook: async (bookData) =&gt; {
+    <span class="hljs-keyword">try</span> {
+        await addDoc(getBooksCollectionRef(), bookData);
+        console.log(<span class="hljs-string">"Book added successfully!"</span>);
+    } <span class="hljs-keyword">catch</span> (<span class="hljs-keyword">error</span>) {
+        console.<span class="hljs-keyword">error</span>(<span class="hljs-string">"Error adding book:"</span>, <span class="hljs-keyword">error</span>);
+        <span class="hljs-keyword">throw</span> <span class="hljs-keyword">error</span>; <span class="hljs-comment">// Re-throw to allow component to handle</span>
+    }
+},
+
+<span class="hljs-comment">// Updates an existing book</span>
+updateBook: async (bookId, bookData) =&gt; {
+    <span class="hljs-keyword">try</span> {
+        <span class="hljs-keyword">const</span> bookDocRef = doc(getBooksCollectionRef(), bookId);
+        <span class="hljs-function">await <span class="hljs-title">updateDoc</span><span class="hljs-params">(bookDocRef, bookData)</span></span>;
+        console.log(<span class="hljs-string">"Book updated successfully!"</span>);
+    } <span class="hljs-keyword">catch</span> (<span class="hljs-keyword">error</span>) {
+        console.<span class="hljs-keyword">error</span>(<span class="hljs-string">"Error updating book:"</span>, <span class="hljs-keyword">error</span>);
+        <span class="hljs-keyword">throw</span> <span class="hljs-keyword">error</span>;
+    }
+},
+
+<span class="hljs-comment">// Deletes a book</span>
+deleteBook: async (bookId) =&gt; {
+    <span class="hljs-keyword">try</span> {
+        <span class="hljs-keyword">const</span> bookDocRef = doc(getBooksCollectionRef(), bookId);
+        <span class="hljs-function">await <span class="hljs-title">deleteDoc</span><span class="hljs-params">(bookDocRef)</span></span>;
+        console.log(<span class="hljs-string">"Book deleted successfully!"</span>);
+    } <span class="hljs-keyword">catch</span> (<span class="hljs-keyword">error</span>) {
+        console.<span class="hljs-keyword">error</span>(<span class="hljs-string">"Error deleting book:"</span>, <span class="hljs-keyword">error</span>);
+        <span class="hljs-keyword">throw</span> <span class="hljs-keyword">error</span>;
+    }
+}
+</code></pre><p>};</p>
+<p>// --- AI Story Generator ---
+const aiStoryGenerator = {
+    generateStory: async (prompt) =&gt; {
+        const payload = {
+            contents: [{ role: &quot;user&quot;, parts: [{ text: prompt }] }],
+            generationConfig: {
+                // Adjust model and generation settings as needed
+                temperature: 0.7,
+                topP: 0.95,
+                topK: 64,
+                maxOutputTokens: 2048,
+            }
+        };
+        const apiKey = &quot;&quot;; // API key will be provided by the Canvas environment
+        const apiUrl = <code>https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}</code>;</p>
+<pre><code>    <span class="hljs-keyword">try</span> {
+        <span class="hljs-keyword">const</span> response = <span class="hljs-keyword">await</span> fetch(apiUrl, {
+            <span class="hljs-attr">method</span>: <span class="hljs-string">'POST'</span>,
+            <span class="hljs-attr">headers</span>: { <span class="hljs-string">'Content-Type'</span>: <span class="hljs-string">'application/json'</span> },
+            <span class="hljs-attr">body</span>: <span class="hljs-built_in">JSON</span>.stringify(payload)
+        });
+
+        <span class="hljs-keyword">if</span> (!response.ok) {
+            <span class="hljs-keyword">const</span> errorData = <span class="hljs-keyword">await</span> response.json();
+            <span class="hljs-built_in">console</span>.error(<span class="hljs-string">"API Error Response:"</span>, errorData);
+            <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-built_in">Error</span>(errorData.error?.message || <span class="hljs-string">'Failed to generate AI story'</span>);
+        }
+
+        <span class="hljs-keyword">const</span> result = <span class="hljs-keyword">await</span> response.json();
+        <span class="hljs-keyword">if</span> (result.candidates &amp;&amp; result.candidates.length &gt; <span class="hljs-number">0</span> &amp;&amp; result.candidates[<span class="hljs-number">0</span>].content &amp;&amp; result.candidates[<span class="hljs-number">0</span>].content.parts &amp;&amp; result.candidates[<span class="hljs-number">0</span>].content.parts.length &gt; <span class="hljs-number">0</span>) {
+            <span class="hljs-keyword">return</span> result.candidates[<span class="hljs-number">0</span>].content.parts[<span class="hljs-number">0</span>].text;
+        } <span class="hljs-keyword">else</span> {
+            <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-built_in">Error</span>(<span class="hljs-string">'No content received from AI.'</span>);
+        }
+    } <span class="hljs-keyword">catch</span> (error) {
+        <span class="hljs-built_in">console</span>.error(<span class="hljs-string">"Error calling AI API:"</span>, error);
+        <span class="hljs-keyword">throw</span> error;
+    }
+}
+</code></pre><p>};</p>
+<p>// --- Reusable UI Components ---</p>
+<p>const Button = ({ children, onClick, className = &#39;&#39;, disabled = false, type = &#39;button&#39; }) =&gt; (
+    <button
+        type={type}
+        onClick={onClick}
+        className={`bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 ${className} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+        disabled={disabled}
+    >
+        {children}
+    </button>
+);</p>
+<p>const Input = ({ label, type = &#39;text&#39;, value, onChange, placeholder = &#39;&#39;, className = &#39;&#39;, required = false }) =&gt; (
+    <div className="mb-4">
+        {label &amp;&amp; <label className="block text-gray-700 text-sm font-bold mb-2">{label}</label>}
+        <input
+            type={type}
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            className={`shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline focus:ring-2 focus:ring-blue-400 ${className}`}
+            required={required}
+        />
+    </div>
+);</p>
+<p>const TextArea = ({ label, value, onChange, placeholder = &#39;&#39;, className = &#39;&#39;, rows = 10, required = false }) =&gt; (
+    <div className="mb-4">
+        {label &amp;&amp; <label className="block text-gray-700 text-sm font-bold mb-2">{label}</label>}
+        <textarea
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            rows={rows}
+            className={`shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline focus:ring-2 focus:ring-blue-400 ${className}`}
+            required={required}
+        />
+    </div>
+);</p>
+<p>const Card = ({ children, className = &#39;&#39; }) =&gt; (
+    <div className={`bg-white rounded-lg shadow-xl p-6 ${className}`}>
+        {children}
+    </div>
+);</p>
+<p>const Loader = ({ message = &quot;Loading...&quot; }) =&gt; (
+    <div className="flex items-center justify-center py-4">
+        <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        {message}
+    </div>
+);</p>
+<p>const MessageModal = ({ message, onClose, type = &#39;info&#39; }) =&gt; {
+    let bgColor = &#39;bg-blue-100&#39;;
+    let borderColor = &#39;border-blue-400&#39;;
+    let textColor = &#39;text-blue-700&#39;;</p>
+<pre><code><span class="hljs-keyword">if</span> (type === <span class="hljs-string">'error'</span>) {
+    bgColor = <span class="hljs-string">'bg-red-100'</span>;
+    borderColor = <span class="hljs-string">'border-red-400'</span>;
+    textColor = <span class="hljs-string">'text-red-700'</span>;
+} <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (type === <span class="hljs-string">'success'</span>) {
+    bgColor = <span class="hljs-string">'bg-green-100'</span>;
+    borderColor = <span class="hljs-string">'border-green-400'</span>;
+    textColor = <span class="hljs-string">'text-green-700'</span>;
+}
+
+<span class="hljs-keyword">return</span> (
+    <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center p-4 z-50"</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">{</span>`<span class="hljs-attr">relative</span> ${<span class="hljs-attr">bgColor</span>} <span class="hljs-attr">border</span> ${<span class="hljs-attr">borderColor</span>} ${<span class="hljs-attr">textColor</span>} <span class="hljs-attr">px-4</span> <span class="hljs-attr">py-3</span> <span class="hljs-attr">rounded-lg</span> <span class="hljs-attr">shadow-lg</span> <span class="hljs-attr">max-w-sm</span> <span class="hljs-attr">w-full</span>`}&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"font-semibold text-lg mb-2"</span>&gt;</span>{type.charAt(0).toUpperCase() + type.slice(1)}:<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">p</span>&gt;</span>{message}<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">button</span>
+                <span class="hljs-attr">onClick</span>=<span class="hljs-string">{onClose}</span>
+                <span class="hljs-attr">className</span>=<span class="hljs-string">"mt-4 bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-1 px-3 rounded-md transition duration-200"</span>
+            &gt;</span>
+                Close
+            <span class="hljs-tag">&lt;/<span class="hljs-name">button</span>&gt;</span>
+        <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span></span>
+);
+</code></pre><p>};</p>
+<p>// --- Pages ---</p>
+<p>const HomePage = () =&gt; (
+    <div className="text-center py-12 px-4 bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+        <h1 className="text-5xl font-extrabold text-gray-900 mb-6 font-inter leading-tight">
+            Welcome to the <span className="text-blue-600">Free E-Book Platform</span>
+        </h1>
+        <p className="text-xl text-gray-700 mb-8 max-w-2xl mx-auto">
+            Discover a world of stories, from timeless classics to new tales generated by cutting-edge AI.
+        </p>
+        <div className="flex justify-center space-x-4">
+            <Button onClick={() => window.location.hash = &#39;#browse&#39;} className=&quot;px-8 py-3 text-lg&quot;&gt;
+                Browse Books
+            </Button>
+            <Button onClick={() => window.location.hash = &#39;#ai-stories&#39;} className=&quot;px-8 py-3 text-lg bg-purple-600 hover:bg-purple-700&quot;&gt;
+                Explore AI Stories
+            </Button>
+        </div></p>
+<pre><code>    <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"mt-16 grid md:grid-cols-2 gap-8 max-w-4xl mx-auto"</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">Card</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"flex flex-col items-center justify-center p-8 border border-blue-200"</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">svg</span> <span class="hljs-attr">xmlns</span>=<span class="hljs-string">"http://www.w3.org/2000/svg"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"h-16 w-16 text-blue-500 mb-4"</span> <span class="hljs-attr">fill</span>=<span class="hljs-string">"none"</span> <span class="hljs-attr">viewBox</span>=<span class="hljs-string">"0 0 24 24"</span> <span class="hljs-attr">stroke</span>=<span class="hljs-string">"currentColor"</span> <span class="hljs-attr">strokeWidth</span>=<span class="hljs-string">"2"</span>&gt;</span>
+                <span class="hljs-tag">&lt;<span class="hljs-name">path</span> <span class="hljs-attr">strokeLinecap</span>=<span class="hljs-string">"round"</span> <span class="hljs-attr">strokeLinejoin</span>=<span class="hljs-string">"round"</span> <span class="hljs-attr">d</span>=<span class="hljs-string">"M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5s3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18s-3.332.477-4.5 1.253"</span> /&gt;</span>
+            <span class="hljs-tag">&lt;/<span class="hljs-name">svg</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">h3</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-2xl font-bold text-gray-800 mb-2"</span>&gt;</span>Your Library, Your Rules<span class="hljs-tag">&lt;/<span class="hljs-name">h3</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-gray-600"</span>&gt;</span>
+                Upload your own creations and share them with the world. You have full control over your content.
+            <span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+        <span class="hljs-tag">&lt;/<span class="hljs-name">Card</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">Card</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"flex flex-col items-center justify-center p-8 border border-purple-200"</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">svg</span> <span class="hljs-attr">xmlns</span>=<span class="hljs-string">"http://www.w3.org/2000/svg"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"h-16 w-16 text-purple-500 mb-4"</span> <span class="hljs-attr">fill</span>=<span class="hljs-string">"none"</span> <span class="hljs-attr">viewBox</span>=<span class="hljs-string">"0 0 24 24"</span> <span class="hljs-attr">stroke</span>=<span class="hljs-string">"currentColor"</span> <span class="hljs-attr">strokeWidth</span>=<span class="hljs-string">"2"</span>&gt;</span>
+                <span class="hljs-tag">&lt;<span class="hljs-name">path</span> <span class="hljs-attr">strokeLinecap</span>=<span class="hljs-string">"round"</span> <span class="hljs-attr">strokeLinejoin</span>=<span class="hljs-string">"round"</span> <span class="hljs-attr">d</span>=<span class="hljs-string">"M9.663 17h4.673M12 21h.01M6 10.118l6 2.882 6-2.882m-6 3.765L12 21l-6-7.118"</span> /&gt;</span>
+            <span class="hljs-tag">&lt;/<span class="hljs-name">svg</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">h3</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-2xl font-bold text-gray-800 mb-2"</span>&gt;</span>Beyond Imagination<span class="hljs-tag">&lt;/<span class="hljs-name">h3</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-gray-600"</span>&gt;</span>
+                Dive into unique narratives crafted by advanced artificial intelligence, pushing the boundaries of storytelling.
+            <span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+        <span class="hljs-tag">&lt;/<span class="hljs-name">Card</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+</code></pre><p>);</p>
+<p>const BrowseBooksPage = () =&gt; {
+    const [books, setBooks] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [searchTerm, setSearchTerm] = useState(&#39;&#39;);</p>
+<pre><code>useEffect(() =&gt; {
+    setLoading(true);
+    const unsubscribe = bookService.onBooksSnapshot((fetchedBooks) =&gt; {
+        setBooks(fetchedBooks);
+        setLoading(false);
+    }, (err) =&gt; {
+        setError('Failed to load books. Please try again later.');
+        console.error("Firestore error:", err);
+        setLoading(false);
+    });
+
+    // Cleanup the listener on component unmount
+    return () =&gt; unsubscribe();
+}, []);
+
+const filteredBooks = books.filter(book =&gt;
+    (book.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    book.author?.toLowerCase().includes(searchTerm.toLowerCase()))
+);
+
+if (loading) {
+    return <span class="hljs-tag">&lt;<span class="hljs-name">Loader</span> <span class="hljs-attr">message</span>=<span class="hljs-string">"Loading books..."</span> /&gt;</span>;
+}
+
+if (error) {
+    return <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-center text-red-600 py-8"</span>&gt;</span>Error: {error}<span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>;
+}
+
+return (
+    <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"container mx-auto p-4 py-8 bg-gray-50 min-h-screen"</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">h1</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-4xl font-bold text-gray-800 mb-8 text-center font-inter"</span>&gt;</span>Explore Our E-Books<span class="hljs-tag">&lt;/<span class="hljs-name">h1</span>&gt;</span>
+
+        <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"mb-8 max-w-md mx-auto"</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">Input</span>
+                <span class="hljs-attr">type</span>=<span class="hljs-string">"text"</span>
+                <span class="hljs-attr">placeholder</span>=<span class="hljs-string">"Search by title or author..."</span>
+                <span class="hljs-attr">value</span>=<span class="hljs-string">{searchTerm}</span>
+                <span class="hljs-attr">onChange</span>=<span class="hljs-string">{(e)</span> =&gt;</span> setSearchTerm(e.target.value)}
+                className="p-3 text-lg"
+            /&gt;
+        <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+
+        {filteredBooks.length === 0 &amp;&amp; (
+            <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-center text-gray-600 text-lg"</span>&gt;</span>
+                {searchTerm ? 'No books found matching your search.' : 'No books available yet. Be the first to upload one!'}
+            <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+        )}
+
+        <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6"</span>&gt;</span>
+            {filteredBooks.map(book =&gt; (
+                <span class="hljs-tag">&lt;<span class="hljs-name">Card</span> <span class="hljs-attr">key</span>=<span class="hljs-string">{book.id}</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"flex flex-col justify-between hover:shadow-2xl transition-shadow duration-300 transform hover:-translate-y-1"</span>&gt;</span>
+                    <span class="hljs-tag">&lt;<span class="hljs-name">div</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">h2</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-2xl font-semibold text-gray-800 mb-2"</span>&gt;</span>{book.title}<span class="hljs-tag">&lt;/<span class="hljs-name">h2</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-gray-600 text-sm mb-4"</span>&gt;</span>By: {book.author || 'Unknown Author'}<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-gray-700 line-clamp-4 mb-4"</span>&gt;</span>{book.content?.substring(0, 200)}...<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+                    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+                    <span class="hljs-tag">&lt;<span class="hljs-name">Button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{()</span> =&gt;</span> window.location.hash = `#read-book/${book.id}`} className="w-full mt-4"&gt;
+                        Read Book
+                    <span class="hljs-tag">&lt;/<span class="hljs-name">Button</span>&gt;</span>
+                <span class="hljs-tag">&lt;/<span class="hljs-name">Card</span>&gt;</span>
+            ))}
+        <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+);
+</code></pre><p>};</p>
+<p>const ReadBookPage = ({ bookId }) =&gt; {
+    const [book, setBook] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);</p>
+<pre><code>useEffect(<span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    <span class="hljs-keyword">const</span> fetchBook = <span class="hljs-keyword">async</span> () =&gt; {
+        setLoading(<span class="hljs-literal">true</span>);
+        setError(<span class="hljs-literal">null</span>);
+        <span class="hljs-keyword">try</span> {
+            <span class="hljs-keyword">const</span> fetchedBook = <span class="hljs-keyword">await</span> bookService.getBookById(bookId);
+            <span class="hljs-keyword">if</span> (fetchedBook) {
+                setBook(fetchedBook);
+            } <span class="hljs-keyword">else</span> {
+                setError(<span class="hljs-string">'Book not found.'</span>);
+            }
+        } <span class="hljs-keyword">catch</span> (err) {
+            <span class="hljs-built_in">console</span>.error(<span class="hljs-string">"Error fetching book:"</span>, err);
+            setError(<span class="hljs-string">'Failed to load book. Please try again.'</span>);
+        } <span class="hljs-keyword">finally</span> {
+            setLoading(<span class="hljs-literal">false</span>);
+        }
+    };
+
+    <span class="hljs-keyword">if</span> (bookId) {
+        fetchBook();
+    } <span class="hljs-keyword">else</span> {
+        setError(<span class="hljs-string">'No book ID provided.'</span>);
+        setLoading(<span class="hljs-literal">false</span>);
+    }
+}, [bookId]);
+
+<span class="hljs-keyword">if</span> (loading) {
+    <span class="hljs-keyword">return</span> <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">Loader</span> <span class="hljs-attr">message</span>=<span class="hljs-string">"Loading book..."</span> /&gt;</span>;
+}
+
+if (error) {
+    return <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-center text-red-600 py-8"</span>&gt;</span>Error: {error} <span class="hljs-tag">&lt;<span class="hljs-name">Button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{()</span> =&gt;</span> window.location.hash = '#browse'} className="ml-4"&gt;Back to Browse<span class="hljs-tag">&lt;/<span class="hljs-name">Button</span>&gt;</span><span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>;
+}
+
+if (!book) {
+    return <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-center text-gray-600 py-8"</span>&gt;</span>Book not found.<span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>;
+}
+
+return (
+    <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"container mx-auto p-4 py-8 bg-gray-50 min-h-screen"</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">Button</span> <span class="hljs-attr">onClick</span>=<span class="hljs-string">{()</span> =&gt;</span> window.location.hash = '#browse'} className="mb-6 px-6 py-2"&gt;
+            &amp;larr; Back to Browse
+        <span class="hljs-tag">&lt;/<span class="hljs-name">Button</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">Card</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"max-w-4xl mx-auto"</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">h1</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-4xl font-bold text-gray-900 mb-4 font-inter"</span>&gt;</span>{book.title}<span class="hljs-tag">&lt;/<span class="hljs-name">h1</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-xl text-gray-700 mb-6"</span>&gt;</span>By: {book.author || 'Unknown Author'}<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"prose prose-lg max-w-none leading-relaxed text-gray-800"</span>&gt;</span>
+                {/* Display content with basic formatting if needed, for simplicity, newlines are handled */}
+                {book.content?.split('\n').map((paragraph, index) =&gt; (
+                    <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">key</span>=<span class="hljs-string">{index}</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"mb-4"</span>&gt;</span>{paragraph}<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+                ))}
+            <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+        <span class="hljs-tag">&lt;/<span class="hljs-name">Card</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+);</span>
+</code></pre><p>};</p>
+<p>const UploadBookPage = () =&gt; {
+    const { userId, currentUser, loadingAuth } = useAuth();
+    const [title, setTitle] = useState(&#39;&#39;);
+    const [author, setAuthor] = useState(&#39;&#39;);
+    const [content, setContent] = useState(&#39;&#39;);
+    const [uploading, setUploading] = useState(false);
+    const [message, setMessage] = useState(null); // { type: &#39;success&#39;|&#39;error&#39;, text: &#39;...&#39; }
+    const [showModal, setShowModal] = useState(false);</p>
+<pre><code>useEffect(() =&gt; {
+    <span class="hljs-keyword">if</span> (!loadingAuth &amp;&amp; !currentUser) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'info'</span>, text: <span class="hljs-string">'You need to be signed in to upload books. Signing you in anonymously...'</span> });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+    }
+}, [loadingAuth, currentUser]);
+
+const handleUpload = async (e) =&gt; {
+    e.preventDefault();
+    <span class="hljs-keyword">if</span> (!title || !content) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'error'</span>, text: <span class="hljs-string">'Please fill in both title and content.'</span> });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+        <span class="hljs-built_in">return</span>;
+    }
+
+    <span class="hljs-built_in">set</span>Uploading(<span class="hljs-literal">true</span>);
+    try {
+        await bookService.addBook({
+            title,
+            author: author || <span class="hljs-string">'Anonymous'</span>, // Default to Anonymous <span class="hljs-keyword">if</span> not provided
+            content,
+            uploadedBy: userId, // Store the userId of the uploader
+            uploadedAt: new Date(),
+            <span class="hljs-built_in">type</span>: <span class="hljs-string">'user-generated'</span>
+        });
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'success'</span>, text: <span class="hljs-string">'Book uploaded successfully!'</span> });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+        // Clear form
+        <span class="hljs-built_in">set</span>Title(<span class="hljs-string">''</span>);
+        <span class="hljs-built_in">set</span>Author(<span class="hljs-string">''</span>);
+        <span class="hljs-built_in">set</span>Content(<span class="hljs-string">''</span>);
+    } catch (err) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'error'</span>, text: `Failed to upload book: <span class="hljs-variable">${err.message}</span>` });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+    } finally {
+        <span class="hljs-built_in">set</span>Uploading(<span class="hljs-literal">false</span>);
+    }
+};
+
+<span class="hljs-keyword">if</span> (loadingAuth) {
+    <span class="hljs-built_in">return</span> &lt;Loader message=<span class="hljs-string">"Authenticating..."</span> /&gt;;
+}
+
+<span class="hljs-built_in">return</span> (
+    &lt;div className=<span class="hljs-string">"container mx-auto p-4 py-8 bg-gray-50 min-h-screen"</span>&gt;
+        &lt;h1 className=<span class="hljs-string">"text-4xl font-bold text-gray-800 mb-8 text-center font-inter"</span>&gt;Upload Your Own Book&lt;/h1&gt;
+        &lt;Card className=<span class="hljs-string">"max-w-2xl mx-auto"</span>&gt;
+            &lt;form onSubmit={handleUpload}&gt;
+                &lt;Input
+                    label=<span class="hljs-string">"Book Title"</span>
+                    value={title}
+                    onChange={(e) =&gt; <span class="hljs-built_in">set</span>Title(e.target.value)}
+                    placeholder=<span class="hljs-string">"Enter the title of your book"</span>
+                    required
+                /&gt;
+                &lt;Input
+                    label=<span class="hljs-string">"Author (Optional)"</span>
+                    value={author}
+                    onChange={(e) =&gt; <span class="hljs-built_in">set</span>Author(e.target.value)}
+                    placeholder=<span class="hljs-string">"Your name or pen name"</span>
+                /&gt;
+                &lt;TextArea
+                    label=<span class="hljs-string">"Book Content"</span>
+                    value={content}
+                    onChange={(e) =&gt; <span class="hljs-built_in">set</span>Content(e.target.value)}
+                    placeholder=<span class="hljs-string">"Write or paste your book content here..."</span>
+                    rows={15}
+                    required
+                /&gt;
+                &lt;p className=<span class="hljs-string">"text-sm text-gray-600 mb-4"</span>&gt;
+                    Your User ID <span class="hljs-keyword">for</span> uploads: &lt;span className=<span class="hljs-string">"font-mono text-blue-700 break-all"</span>&gt;{userId}&lt;/span&gt;
+                &lt;/p&gt;
+                &lt;Button <span class="hljs-built_in">type</span>=<span class="hljs-string">"submit"</span> disabled={uploading} className=<span class="hljs-string">"w-full"</span>&gt;
+                    {uploading ? &lt;Loader message=<span class="hljs-string">"Uploading..."</span> /&gt; : <span class="hljs-string">'Upload Book'</span>}
+                &lt;/Button&gt;
+            &lt;/form&gt;
+        &lt;/Card&gt;
+        {showModal &amp;&amp; message &amp;&amp; (
+            &lt;MessageModal
+                message={message.text}
+                <span class="hljs-built_in">type</span>={message.type}
+                onClose={() =&gt; <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">false</span>)}
+            /&gt;
+        )}
+    &lt;/div&gt;
+);
+</code></pre><p>};</p>
+<p>const AISearchPage = () =&gt; {
+    const { userId, loadingAuth } = useAuth();
+    const [prompt, setPrompt] = useState(&#39;&#39;);
+    const [generatedStory, setGeneratedStory] = useState(&#39;&#39;);
+    const [generating, setGenerating] = useState(false);
+    const [saveLoading, setSaveLoading] = useState(false);
+    const [message, setMessage] = useState(null);
+    const [showModal, setShowModal] = useState(false);
+    const [storyTitle, setStoryTitle] = useState(&#39;&#39;);
+    const [storyAuthor, setStoryAuthor] = useState(&#39;AI Generated&#39;);</p>
+<pre><code>const handleGenerateStory = async () =&gt; {
+    <span class="hljs-keyword">if</span> (!prompt) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'error'</span>, text: <span class="hljs-string">'Please enter a prompt to generate a story.'</span> });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+        <span class="hljs-built_in">return</span>;
+    }
+    <span class="hljs-built_in">set</span>Generating(<span class="hljs-literal">true</span>);
+    <span class="hljs-built_in">set</span>GeneratedStory(<span class="hljs-string">''</span>);
+    <span class="hljs-built_in">set</span>Message(null);
+    <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">false</span>); // Close previous modal <span class="hljs-keyword">if</span> any
+    try {
+        const story = await aiStoryGenerator.generateStory(prompt);
+        <span class="hljs-built_in">set</span>GeneratedStory(story);
+        <span class="hljs-built_in">set</span>StoryTitle(`AI Story: <span class="hljs-variable">${prompt.substring(0, 30)}</span>...`); // Suggest a title
+    } catch (err) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'error'</span>, text: `Error generating story: <span class="hljs-variable">${err.message}</span>` });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+        <span class="hljs-built_in">set</span>GeneratedStory(<span class="hljs-string">''</span>); // Clear any partial generation
+    } finally {
+        <span class="hljs-built_in">set</span>Generating(<span class="hljs-literal">false</span>);
+    }
+};
+
+const handleSaveStory = async () =&gt; {
+    <span class="hljs-keyword">if</span> (!generatedStory) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'error'</span>, text: <span class="hljs-string">'No story to save. Please generate one first.'</span> });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+        <span class="hljs-built_in">return</span>;
+    }
+    <span class="hljs-keyword">if</span> (!storyTitle) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'error'</span>, text: <span class="hljs-string">'Please enter a title for the AI story before saving.'</span> });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+        <span class="hljs-built_in">return</span>;
+    }
+    <span class="hljs-built_in">set</span>SaveLoading(<span class="hljs-literal">true</span>);
+    try {
+        await bookService.addBook({
+            title: storyTitle,
+            author: storyAuthor,
+            content: generatedStory,
+            uploadedBy: userId,
+            uploadedAt: new Date(),
+            <span class="hljs-built_in">type</span>: <span class="hljs-string">'ai-generated'</span>
+        });
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'success'</span>, text: <span class="hljs-string">'AI Story saved as a book successfully!'</span> });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+        // Optionally clear generated story and title
+        <span class="hljs-built_in">set</span>GeneratedStory(<span class="hljs-string">''</span>);
+        <span class="hljs-built_in">set</span>Prompt(<span class="hljs-string">''</span>);
+        <span class="hljs-built_in">set</span>StoryTitle(<span class="hljs-string">''</span>);
+    } catch (err) {
+        <span class="hljs-built_in">set</span>Message({ <span class="hljs-built_in">type</span>: <span class="hljs-string">'error'</span>, text: `Failed to save AI story: <span class="hljs-variable">${err.message}</span>` });
+        <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">true</span>);
+    } finally {
+        <span class="hljs-built_in">set</span>SaveLoading(<span class="hljs-literal">false</span>);
+    }
+};
+
+<span class="hljs-keyword">if</span> (loadingAuth) {
+    <span class="hljs-built_in">return</span> &lt;Loader message=<span class="hljs-string">"Authenticating for AI services..."</span> /&gt;;
+}
+
+<span class="hljs-built_in">return</span> (
+    &lt;div className=<span class="hljs-string">"container mx-auto p-4 py-8 bg-gray-50 min-h-screen"</span>&gt;
+        &lt;h1 className=<span class="hljs-string">"text-4xl font-bold text-gray-800 mb-8 text-center font-inter"</span>&gt;AI Story Generator&lt;/h1&gt;
+        &lt;Card className=<span class="hljs-string">"max-w-3xl mx-auto"</span>&gt;
+            &lt;Input
+                label=<span class="hljs-string">"Prompt for AI Story"</span>
+                value={prompt}
+                onChange={(e) =&gt; <span class="hljs-built_in">set</span>Prompt(e.target.value)}
+                placeholder=<span class="hljs-string">"e.g., 'A brave knight on a quest to find a lost dragon egg'"</span>
+                className=<span class="hljs-string">"mb-4"</span>
+            /&gt;
+            &lt;Button onClick={handleGenerateStory} disabled={generating} className=<span class="hljs-string">"w-full mb-6"</span>&gt;
+                {generating ? &lt;Loader message=<span class="hljs-string">"Generating..."</span> /&gt; : <span class="hljs-string">'Generate AI Story'</span>}
+            &lt;/Button&gt;
+
+            {generatedStory &amp;&amp; (
+                &lt;div className=<span class="hljs-string">"mt-8 p-4 bg-blue-50 border border-blue-200 rounded-lg shadow-inner"</span>&gt;
+                    &lt;h2 className=<span class="hljs-string">"text-2xl font-semibold text-blue-800 mb-3"</span>&gt;Generated Story:&lt;/h2&gt;
+                    &lt;TextArea
+                        value={generatedStory}
+                        onChange={(e) =&gt; <span class="hljs-built_in">set</span>GeneratedStory(e.target.value)}
+                        rows={15}
+                        <span class="hljs-built_in">read</span>Only={<span class="hljs-literal">false</span>} // Allow user to edit <span class="hljs-keyword">if</span> they want before saving
+                        className=<span class="hljs-string">"bg-white border-gray-300 read-only:bg-gray-100 read-only:cursor-text"</span>
+                    /&gt;
+                    &lt;div className=<span class="hljs-string">"mt-6 border-t border-gray-200 pt-6"</span>&gt;
+                        &lt;h3 className=<span class="hljs-string">"text-xl font-semibold text-gray-700 mb-4"</span>&gt;Save this AI Story as a Book:&lt;/h3&gt;
+                        &lt;Input
+                            label=<span class="hljs-string">"Story Title"</span>
+                            value={storyTitle}
+                            onChange={(e) =&gt; <span class="hljs-built_in">set</span>StoryTitle(e.target.value)}
+                            placeholder=<span class="hljs-string">"A title for your AI-generated story"</span>
+                            required
+                        /&gt;
+                        &lt;Input
+                            label=<span class="hljs-string">"Author"</span>
+                            value={storyAuthor}
+                            onChange={(e) =&gt; <span class="hljs-built_in">set</span>StoryAuthor(e.target.value)}
+                            placeholder=<span class="hljs-string">"e.g., AI Generated"</span>
+                            required
+                        /&gt;
+                        &lt;p className=<span class="hljs-string">"text-sm text-gray-600 mb-4"</span>&gt;
+                            Your User ID <span class="hljs-keyword">for</span> uploads: &lt;span className=<span class="hljs-string">"font-mono text-blue-700 break-all"</span>&gt;{userId}&lt;/span&gt;
+                        &lt;/p&gt;
+                        &lt;Button onClick={handleSaveStory} disabled={saveLoading} className=<span class="hljs-string">"w-full bg-green-600 hover:bg-green-700"</span>&gt;
+                            {saveLoading ? &lt;Loader message=<span class="hljs-string">"Saving..."</span> /&gt; : <span class="hljs-string">'Save AI Story as Book'</span>}
+                        &lt;/Button&gt;
+                    &lt;/div&gt;
+                &lt;/div&gt;
+            )}
+        &lt;/Card&gt;
+        {showModal &amp;&amp; message &amp;&amp; (
+            &lt;MessageModal
+                message={message.text}
+                <span class="hljs-built_in">type</span>={message.type}
+                onClose={() =&gt; <span class="hljs-built_in">set</span>ShowModal(<span class="hljs-literal">false</span>)}
+            /&gt;
+        )}
+    &lt;/div&gt;
+);
+</code></pre><p>};</p>
+<p>const AboutPage = () =&gt; (
+    <div className="container mx-auto p-4 py-8 bg-gray-50 min-h-screen">
+        <h1 className="text-4xl font-bold text-gray-800 mb-8 text-center font-inter">About Our Platform</h1>
+        <Card className="max-w-3xl mx-auto text-lg text-gray-700 leading-relaxed">
+            <p className="mb-4">
+                Welcome to our Free E-Book Online Reading Platform! Our mission is to provide an accessible and diverse library of stories for readers of all ages. We believe in the power of storytelling to educate, entertain, and inspire.
+            </p>
+            <p className="mb-4">
+                Here, you can explore a growing collection of e-books contributed by talented authors like yourself. We empower anyone to upload their creations and share them with a global audience, fostering a vibrant community of readers and writers.
+            </p>
+            <p className="mb-4">
+                What makes us unique is our integration with advanced AI. You can even generate your own unique stories using our AI Story Generator, pushing the boundaries of creativity and imagination.
+            </p>
+            <p>
+                We are committed to providing a user-friendly and engaging experience for everyone. Happy reading and writing!
+            </p>
+        </Card>
+    </div>
+);</p>
+<p>const ContactPage = () =&gt; (
+    <div className="container mx-auto p-4 py-8 bg-gray-50 min-h-screen">
+        <h1 className="text-4xl font-bold text-gray-800 mb-8 text-center font-inter">Contact Us</h1>
+        <Card className="max-w-2xl mx-auto text-lg text-gray-700 leading-relaxed">
+            <p className="mb-4">
+                Have questions, suggestions, or need assistance? We&#39;d love to hear from you!
+            </p>
+            <p className="mb-4">
+                You can reach out to us via:
+            </p>
+            <ul className="list-disc list-inside mb-4 ml-4">
+                <li className="mb-2"><strong>Email:</strong> <a href="mailto:support@ebookplatform.com" className="text-blue-600 hover:underline">support@ebookplatform.com</a></li>
+                <li className="mb-2"><strong>Feedback Form:</strong> Currently under development.</li>
+            </ul>
+            <p>
+                We aim to respond to all inquiries within 24-48 business hours. Thank you for your patience!
+            </p>
+        </Card>
+    </div>
+);</p>
+<p>// New component for displaying userId in the footer
+const FooterUserIdDisplay = () =&gt; {
+    const { userId, loadingAuth } = useAuth();
+    return (
+        <span className="font-mono">{loadingAuth ? &#39;Loading...&#39; : userId || &#39;Not available&#39;}</span>
+    );
+};</p>
+<p>// --- Main App Component ---
+const App = () =&gt; {
+    const [currentPage, setCurrentPage] = useState(&#39;home&#39;);
+    // Removed direct destructuring of userId, currentUser, loadingAuth here.
+    // These are now consumed by child components wrapped by AuthProvider.</p>
+<pre><code>useEffect(<span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    <span class="hljs-comment">// Function to handle hash changes</span>
+    <span class="hljs-keyword">const</span> handleHashChange = <span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+        <span class="hljs-keyword">const</span> hash = <span class="hljs-built_in">window</span>.location.hash.replace(<span class="hljs-regexp">/^#/</span>, <span class="hljs-string">''</span>);
+        <span class="hljs-keyword">if</span> (hash.startsWith(<span class="hljs-string">'read-book/'</span>)) {
+            setCurrentPage(<span class="hljs-string">'read-book'</span>);
+        } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> ([<span class="hljs-string">'home'</span>, <span class="hljs-string">'browse'</span>, <span class="hljs-string">'upload'</span>, <span class="hljs-string">'ai-stories'</span>, <span class="hljs-string">'about'</span>, <span class="hljs-string">'contact'</span>].includes(hash)) {
+            setCurrentPage(hash);
+        } <span class="hljs-keyword">else</span> {
+            setCurrentPage(<span class="hljs-string">'home'</span>); <span class="hljs-comment">// Default to home if hash is unrecognized</span>
+        }
+    };
+
+    <span class="hljs-comment">// Set initial page based on current hash</span>
+    handleHashChange();
+
+    <span class="hljs-comment">// Listen for hash changes</span>
+    <span class="hljs-built_in">window</span>.addEventListener(<span class="hljs-string">'hashchange'</span>, handleHashChange);
+
+    <span class="hljs-comment">// Cleanup listener</span>
+    <span class="hljs-keyword">return</span> <span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+        <span class="hljs-built_in">window</span>.removeEventListener(<span class="hljs-string">'hashchange'</span>, handleHashChange);
+    };
+}, []);
+
+<span class="hljs-keyword">const</span> getBookIdFromHash = <span class="hljs-function"><span class="hljs-params">()</span> =&gt;</span> {
+    <span class="hljs-keyword">const</span> hash = <span class="hljs-built_in">window</span>.location.hash.replace(<span class="hljs-regexp">/^#/</span>, <span class="hljs-string">''</span>);
+    <span class="hljs-keyword">if</span> (hash.startsWith(<span class="hljs-string">'read-book/'</span>)) {
+        <span class="hljs-keyword">return</span> hash.split(<span class="hljs-string">'/'</span>)[<span class="hljs-number">1</span>];
+    }
+    <span class="hljs-keyword">return</span> <span class="hljs-literal">null</span>;
+};
+
+<span class="hljs-keyword">let</span> PageComponent;
+<span class="hljs-keyword">let</span> pageProps = {};
+
+<span class="hljs-keyword">switch</span> (currentPage) {
+    <span class="hljs-keyword">case</span> <span class="hljs-string">'home'</span>:
+        PageComponent = HomePage;
+        <span class="hljs-keyword">break</span>;
+    <span class="hljs-keyword">case</span> <span class="hljs-string">'browse'</span>:
+        PageComponent = BrowseBooksPage;
+        <span class="hljs-keyword">break</span>;
+    <span class="hljs-keyword">case</span> <span class="hljs-string">'upload'</span>:
+        PageComponent = UploadBookPage;
+        <span class="hljs-keyword">break</span>;
+    <span class="hljs-keyword">case</span> <span class="hljs-string">'ai-stories'</span>:
+        PageComponent = AISearchPage;
+        <span class="hljs-keyword">break</span>;
+    <span class="hljs-keyword">case</span> <span class="hljs-string">'about'</span>:
+        PageComponent = AboutPage;
+        <span class="hljs-keyword">break</span>;
+    <span class="hljs-keyword">case</span> <span class="hljs-string">'contact'</span>:
+        PageComponent = ContactPage;
+        <span class="hljs-keyword">break</span>;
+    <span class="hljs-keyword">case</span> <span class="hljs-string">'read-book'</span>:
+        PageComponent = ReadBookPage;
+        pageProps.bookId = getBookIdFromHash();
+        <span class="hljs-keyword">break</span>;
+    <span class="hljs-keyword">default</span>:
+        PageComponent = HomePage;
+}
+
+<span class="hljs-keyword">return</span> (
+    <span class="xml"><span class="hljs-tag">&lt;<span class="hljs-name">AuthProvider</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"min-h-screen bg-gray-100 font-inter antialiased"</span>&gt;</span>
+            {/* Tailwind CSS CDN */}
+            <span class="hljs-tag">&lt;<span class="hljs-name">script</span> <span class="hljs-attr">src</span>=<span class="hljs-string">"https://cdn.tailwindcss.com"</span>&gt;</span><span class="undefined"></span><span class="hljs-tag">&lt;/<span class="hljs-name">script</span>&gt;</span>
+            {/* Navigation Bar */}
+            <span class="hljs-tag">&lt;<span class="hljs-name">nav</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"bg-gray-800 text-white p-4 shadow-lg"</span>&gt;</span>
+                <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"container mx-auto flex flex-col md:flex-row justify-between items-center"</span>&gt;</span>
+                    <span class="hljs-tag">&lt;<span class="hljs-name">a</span> <span class="hljs-attr">href</span>=<span class="hljs-string">"#home"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-2xl font-bold text-white hover:text-blue-300 transition-colors duration-200 mb-3 md:mb-0"</span>&gt;</span>E-Book Platform<span class="hljs-tag">&lt;/<span class="hljs-name">a</span>&gt;</span>
+                    <span class="hljs-tag">&lt;<span class="hljs-name">ul</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"flex flex-wrap justify-center md:space-x-6 space-x-2 text-lg"</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">li</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">a</span> <span class="hljs-attr">href</span>=<span class="hljs-string">"#home"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"hover:text-blue-300 transition-colors duration-200 px-2 py-1 rounded"</span>&gt;</span>Home<span class="hljs-tag">&lt;/<span class="hljs-name">a</span>&gt;</span><span class="hljs-tag">&lt;/<span class="hljs-name">li</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">li</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">a</span> <span class="hljs-attr">href</span>=<span class="hljs-string">"#browse"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"hover:text-blue-300 transition-colors duration-200 px-2 py-1 rounded"</span>&gt;</span>Browse Books<span class="hljs-tag">&lt;/<span class="hljs-name">a</span>&gt;</span><span class="hljs-tag">&lt;/<span class="hljs-name">li</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">li</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">a</span> <span class="hljs-attr">href</span>=<span class="hljs-string">"#ai-stories"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"hover:text-blue-300 transition-colors duration-200 px-2 py-1 rounded"</span>&gt;</span>AI Stories<span class="hljs-tag">&lt;/<span class="hljs-name">a</span>&gt;</span><span class="hljs-tag">&lt;/<span class="hljs-name">li</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">li</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">a</span> <span class="hljs-attr">href</span>=<span class="hljs-string">"#upload"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"hover:text-blue-300 transition-colors duration-200 px-2 py-1 rounded"</span>&gt;</span>Upload Book<span class="hljs-tag">&lt;/<span class="hljs-name">a</span>&gt;</span><span class="hljs-tag">&lt;/<span class="hljs-name">li</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">li</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">a</span> <span class="hljs-attr">href</span>=<span class="hljs-string">"#about"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"hover:text-blue-300 transition-colors duration-200 px-2 py-1 rounded"</span>&gt;</span>About<span class="hljs-tag">&lt;/<span class="hljs-name">a</span>&gt;</span><span class="hljs-tag">&lt;/<span class="hljs-name">li</span>&gt;</span>
+                        <span class="hljs-tag">&lt;<span class="hljs-name">li</span>&gt;</span><span class="hljs-tag">&lt;<span class="hljs-name">a</span> <span class="hljs-attr">href</span>=<span class="hljs-string">"#contact"</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"hover:text-blue-300 transition-colors duration-200 px-2 py-1 rounded"</span>&gt;</span>Contact<span class="hljs-tag">&lt;/<span class="hljs-name">a</span>&gt;</span><span class="hljs-tag">&lt;/<span class="hljs-name">li</span>&gt;</span>
+                    <span class="hljs-tag">&lt;/<span class="hljs-name">ul</span>&gt;</span>
+                <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+            <span class="hljs-tag">&lt;/<span class="hljs-name">nav</span>&gt;</span>
+
+            {/* Main Content Area */}
+            <span class="hljs-tag">&lt;<span class="hljs-name">main</span>&gt;</span>
+                <span class="hljs-tag">&lt;<span class="hljs-name">PageComponent</span> {<span class="hljs-attr">...pageProps</span>} /&gt;</span>
+            <span class="hljs-tag">&lt;/<span class="hljs-name">main</span>&gt;</span>
+
+            {/* Footer */}
+            <span class="hljs-tag">&lt;<span class="hljs-name">footer</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"bg-gray-800 text-white p-6 text-center mt-auto shadow-inner"</span>&gt;</span>
+                <span class="hljs-tag">&lt;<span class="hljs-name">div</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"container mx-auto"</span>&gt;</span>
+                    <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-sm"</span>&gt;</span>&amp;copy; {new Date().getFullYear()} Free E-Book Platform. All rights reserved.<span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+                    <span class="hljs-tag">&lt;<span class="hljs-name">p</span> <span class="hljs-attr">className</span>=<span class="hljs-string">"text-xs mt-2"</span>&gt;</span>
+                        Built with ❤️ and AI. Your User ID (for uploads): <span class="hljs-tag">&lt;<span class="hljs-name">FooterUserIdDisplay</span> /&gt;</span>
+                    <span class="hljs-tag">&lt;/<span class="hljs-name">p</span>&gt;</span>
+                <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+            <span class="hljs-tag">&lt;/<span class="hljs-name">footer</span>&gt;</span>
+        <span class="hljs-tag">&lt;/<span class="hljs-name">div</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">AuthProvider</span>&gt;</span>
+);</span>
+</code></pre><p>};</p>
+<p>export default App;</p>
+</body></html>
